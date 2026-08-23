@@ -152,10 +152,10 @@ async def deauth_user(_, message):
 
 @app.on_message(filters.command("start") & auth_filter)
 async def start_command(_, message):
-    await safe_reply(message, "Idle Explorer Bot\n\n/login - Add an account\n/logout <phone> - Remove your account\n/accounts - List your accounts\n/stats - Show the last run\n/idle_explore - Run a cycle\n/cancel - Stop the current cycle")
+    await safe_reply(message, "Idle Explorer Bot\n\n/login or /add_account - Add an account\n/logout <phone> - Remove your account\n/accounts or /status - List your accounts\n/stats - Show the last run\n/idle_explore - Run a cycle\n/cancel - Stop the current cycle")
 
 
-@app.on_message(filters.command("accounts") & auth_filter)
+@app.on_message(filters.command(["accounts", "status"]) & auth_filter)
 async def list_accounts(_, message):
     accounts = await sessions_col.find({"owner_tg_id": message.from_user.id}, {"first_name": 1, "phone_number": 1}).to_list(length=100)
     if not accounts:
@@ -181,7 +181,7 @@ async def cancel_run(_, message):
     await safe_reply(message, "Cancellation requested.")
 
 
-@app.on_message(filters.command("login") & auth_filter)
+@app.on_message(filters.command(["login", "add_account"]) & auth_filter)
 async def login_start(_, message):
     clear_login_state(message.from_user.id)
     login_states[message.from_user.id] = {"step": "phone"}
@@ -211,7 +211,7 @@ async def login_steps_handler(client, message):
             await temp_client.connect()
             sent_code = await temp_client.send_code(phone)
             state.update({"step": "code", "hash": sent_code.phone_code_hash})
-            await safe_reply(message, "OTP sent. Reply with digits separated by one space, like: 1 2 3 4 5\nJyada gand msti nhi karni bc, jaldi se bhej de warna expire ho jayega.")
+            await safe_reply(message, "OTP sent. Reply with digits separated by one space, like: 1 2 3 4 5\nSend it quickly before it expires.")
         except Exception as error:
             logger.exception("OTP request failed for %s", phone)
             await safe_reply(message, f"Could not request OTP: {display_error(error)}")

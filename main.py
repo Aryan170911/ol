@@ -80,9 +80,9 @@ async def safe_reply(message, text, reply_markup=None):
     return None
 
 
-async def safe_edit(message, text):
+async def safe_edit(message, text, reply_markup=None):
     with suppress(Exception):
-        return await message.edit_text(text)
+        return await message.edit_text(text, reply_markup=reply_markup)
     return None
 
 
@@ -347,53 +347,135 @@ async def start_explore(client, message):
     if lock.locked():
         return await safe_reply(message, "⏳ *CYCLE IN PROGRESS*\n\nPlease wait for the current cycle to finish.")
     async with lock:
-        await run_explore_cycle(client, user_id, message.chat.id)
+        await run_explore_cycle(client, user_id, message.chat.id, phase="start")
 
 
-@app.on_callback_query(filters.regex(r"^end_exploration$"))
-async def end_exploration(client, callback):
-    await safe_edit(callback.message, "🚀 *STARTING NEXT CYCLE*\n\nPreparing your accounts...")
+@app.on_callback_query(filters.regex(r"^claim_rewards$"))
+async def claim_rewards(client, callback):
+    await safe_edit(callback.message, "🎁 *CLAIMING REWARDS*\n\nProcessing your accounts sequentially...")
     lock = get_user_lock(callback.from_user.id)
     if lock.locked():
-        return
+        return await callback.answer("A cycle is already running.", show_alert=True)
     async with lock:
-        await run_explore_cycle(client, callback.from_user.id, callback.message.chat.id)
+        await run_explore_cycle(client, callback.from_user.id, callback.message.chat.id, phase="claim")
 
 
-async def run_explore_cycle(app_client, user_id, chat_id):
+@app.on_callback_query(filters.regex(r"^re_explore$"))
+async def re_explore(client, callback):
+    await safe_edit(callback.message, "🔄 *RE-EXPLORE REQUESTED*\n\nStarting exploration on your accounts...")
+    lock = get_user_lock(callback.from_user.id)
+    if lock.locked():
+        return await callback.answer("A cycle is already running.", show_alert=True)
+    async with lock:
+        await run_explore_cycle(client, callback.from_user.id, callback.message.chat.id, phase="start")
+
+
+def button_matches(button_text, kind):
+    normalized = re.sub(r"\s+", " ", (button_text or "").strip().lower())
+    if kind == "claim":
+        return "claim reward" in normalized or normalized == "claim"
+    if kind == "quick":
+        return "simple quick" in normalized or normalized == "quick"
+    return False
+
+
+async def click_latest_target_button(user_client, kind, limit=8, min_message_id=0):
+    async for target_message in user_client.get_chat_history(TARGET_BOT, limit=limit):
+        if target_message.id <= min_message_id:
+            continue
+        markup = target_message.reply_markup
+        if not markup or not markup.inline_keyboard:
+            continue
+        for row in markup.inline_keyboard:
+            for button in row:
+                if button_matches(button.text, kind) and button.callback_data:
+                    await user_client.request_callback_answer(
+                        TARGET_BOT,
+                        target_message.id,
+                        button.callback_data,
+                    )
+                    logger.info("Clicked target button: kind=%s label=%s message_id=%s", kind, button.text, target_message.id)
+                    return True
+        logger.debug("Target message has no requested button: kind=%s message_id=%s", kind, target_message.id)
+    return False
+
+
+async def has_latest_target_button(user_client, kind, limit=8):
+    async for target_message in user_client.get_chat_history(TARGET_BOT, limit=limit):
+        markup = target_message.reply_markup
+        if not markup or not markup.inline_keyboard:
+            continue
+        for row in markup.inline_keyboard:
+            for button in row:
+                if button_matches(button.text, kind) and button.callback_data:
+                    logger.info("Found existing target button: kind=%s label=%s message_id=%s", kind, button.text, target_message.id)
+                    return True
+    return False
+
+
+async def send_target_command(user_client):
+    previous_message_id = 0
+    async for target_message in user_client.get_chat_history(TARGET_BOT, limit=1):
+        previous_message_id = target_message.id
+        break
+    await user_client.send_message(TARGET_BOT, "/idle_explore")
+    await asyncio.sleep(3)
+    return previous_message_id
+
+
+async def start_account_exploration(user_client):
+    # An account added after an earlier run may already have a reward waiting.
+    old_claim = await has_latest_target_button(user_client, "claim")
+    if old_claim:
+        logger.info("Recovered an existing unclaimed exploration")
+        previous_message_id = await send_target_command(user_client)
+        claimed = await click_latest_target_button(user_client, "claim", min_message_id=previous_message_id)
+        if not claimed:
+            return False, True
+        await asyncio.sleep(2)
+        previous_message_id = await send_target_command(user_client)
+        return await click_latest_target_button(user_client, "quick", min_message_id=previous_message_id), True
+
+    previous_message_id = await send_target_command(user_client)
+    return await click_latest_target_button(user_client, "quick", min_message_id=previous_message_id), False
+
+
+async def claim_account_reward(user_client):
+    previous_message_id = await send_target_command(user_client)
+    return await click_latest_target_button(user_client, "claim", min_message_id=previous_message_id)
+
+
+async def run_explore_cycle(app_client, user_id, chat_id, phase="start"):
     cancel_flags[user_id] = False
     accounts = await sessions_col.find({"owner_tg_id": user_id}).to_list(length=100)
     if not accounts:
         return await safe_send(app_client, chat_id, "📭 *NO ACCOUNTS*\n\nUse `/login` to add an account first.")
-    status = await safe_send(app_client, chat_id, f"🚀 *CYCLE STARTED*\n\nProcessing `{len(accounts)}` account(s) sequentially...")
+    if phase == "claim":
+        heading = "🎁 *CLAIM PHASE STARTED*"
+        detail = "Collecting rewards from all accounts..."
+    else:
+        heading = "🚀 *EXPLORATION STARTED*"
+        detail = "Starting all accounts sequentially..."
+    status = await safe_send(app_client, chat_id, f"{heading}\n\n{detail}\n📦 Accounts: `{len(accounts)}`")
     success = 0
     failed = 0
+    recovered = 0
     for index, account in enumerate(accounts, 1):
         if cancel_flags.get(user_id):
             break
         if status:
-            await safe_edit(status, f"⚙️ *PROCESSING ACCOUNT*\n\n`{index}/{len(accounts)}` • *{account.get('first_name', 'Unknown')}*")
+            action = "Claiming" if phase == "claim" else "Starting"
+            await safe_edit(status, f"⚙️ *{action.upper()} ACCOUNT*\n\n`{index}/{len(accounts)}` • *{account.get('first_name', 'Unknown')}*")
         user_client = None
         try:
             user_client = Client(f"run_{user_id}_{index}", api_id=API_ID, api_hash=API_HASH, session_string=account["session_string"], in_memory=True)
             await user_client.connect()
-            await user_client.send_message(TARGET_BOT, "/idle_explore")
-            await asyncio.sleep(3)
-            clicked = False
-            async for target_message in user_client.get_chat_history(TARGET_BOT, limit=5):
-                markup = target_message.reply_markup
-                if not markup or not markup.inline_keyboard:
-                    continue
-                for row in markup.inline_keyboard:
-                    for button in row:
-                        if button.text and "Simple Quick" in button.text:
-                            await user_client.request_callback_answer(TARGET_BOT, target_message.id, button.callback_data)
-                            clicked = True
-                            break
-                    if clicked:
-                        break
-                if clicked:
-                    break
+            if phase == "claim":
+                clicked = await claim_account_reward(user_client)
+            else:
+                clicked, was_recovered = await start_account_exploration(user_client)
+                if was_recovered:
+                    recovered += 1
             if clicked:
                 success += 1
             else:
@@ -408,18 +490,24 @@ async def run_explore_cycle(app_client, user_id, chat_id):
     if cancel_flags.get(user_id):
         return await safe_send(app_client, chat_id, "🛑 *CYCLE CANCELLED*\n\nThe accounts were disconnected safely.")
     if status:
-        await safe_edit(status, f"✅ *CYCLE COMPLETE*\n\n✅ Success: `{success}`\n❌ Failed: `{failed}`\n\n⏱️ Next action available in 5 minutes.")
-    old_task = timer_tasks.pop(user_id, None)
-    if old_task and not old_task.done():
-        old_task.cancel()
-    timer_tasks[user_id] = asyncio.create_task(claim_timer(app_client, user_id, chat_id))
+        if phase == "claim":
+            result = f"✅ Claimed: `{success}`\n❌ Failed: `{failed}`"
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Re-explore", callback_data="re_explore")]])
+            await safe_edit(status, f"🎁 *CLAIMING COMPLETE*\n\n{result}\n\n🔄 Press below when you want to start again.", reply_markup=keyboard)
+        else:
+            recovery_line = f"\n♻️ Recovered old claims: `{recovered}`" if recovered else ""
+            await safe_edit(status, f"✅ *EXPLORATION STARTED*\n\n✅ Started: `{success}`\n❌ Failed: `{failed}`{recovery_line}\n\n⏱️ Claim reminder in 5 minutes.")
+            old_task = timer_tasks.pop(user_id, None)
+            if old_task and not old_task.done():
+                old_task.cancel()
+            timer_tasks[user_id] = asyncio.create_task(claim_timer(app_client, user_id, chat_id))
 
 
 async def claim_timer(app_client, user_id, chat_id):
     try:
         await asyncio.sleep(300)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("End Exploration / Claim", callback_data="end_exploration")]])
-        await safe_send(app_client, chat_id, "🔔 *5 MINUTES PASSED*\n\nYour next cycle is ready to claim/end exploration.", keyboard)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Claim Rewards", callback_data="claim_rewards")]])
+        await safe_send(app_client, chat_id, "🔔 *EXPLORATION TIME COMPLETE*\n\nYour accounts are ready for reward collection.", keyboard)
     except asyncio.CancelledError:
         raise
     finally:

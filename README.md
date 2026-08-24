@@ -2,6 +2,10 @@
 
 A powerful, asynchronous Telegram userbot designed to automate background tasks and resource gathering. Built to handle multiple accounts with perfect synchronization, this bot mimics human behavior to bypass rate limits while effortlessly managing a massive digital workforce.
 
+## 🆕 Added Features
+
+*   **Claim reward and re-explore :** Now can claim reward and reexplore with one touch, altho old only claim button exists.
+  
 ## 🚀 Key Features
 
 *   **Sequential Automation Engine:** Processes hundreds of accounts one by one with randomized, human-like delays to prevent Telegram flood waits and bans.

@@ -513,10 +513,7 @@ async def run_explore_cycle(app_client, user_id, chat_id, phase="start"):
     if status:
         if phase == "claim":
             result = f"✅ Claimed: `{success}`\n❌ Failed: `{failed}`"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎁 Claim & Re-explore", callback_data="claim_and_reexplore")],
-                [InlineKeyboardButton("🔄 Re-explore", callback_data="re_explore")],
-            ])
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Re-explore", callback_data="re_explore")]])
             await safe_edit(status, f"🎁 *CLAIMING COMPLETE*\n\n{result}\n\n🔄 Press below when you want to start again.", reply_markup=keyboard)
         elif phase == "claim_and_reexplore":
             result = f"✅ Claimed & re-explored: `{success}`\n❌ Failed: `{failed}`"

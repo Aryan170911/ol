@@ -370,6 +370,16 @@ async def re_explore(client, callback):
         await run_explore_cycle(client, callback.from_user.id, callback.message.chat.id, phase="start")
 
 
+@app.on_callback_query(filters.regex(r"^claim_and_reexplore$"))
+async def claim_and_reexplore(client, callback):
+    await safe_edit(callback.message, "🎁 *CLAIMING AND RE-EXPLORING*\n\nProcessing your accounts sequentially...")
+    lock = get_user_lock(callback.from_user.id)
+    if lock.locked():
+        return await callback.answer("A cycle is already running.", show_alert=True)
+    async with lock:
+        await run_explore_cycle(client, callback.from_user.id, callback.message.chat.id, phase="claim_and_reexplore")
+
+
 def button_matches(button_text, kind):
     normalized = re.sub(r"\s+", " ", (button_text or "").strip().lower())
     if kind == "claim":
@@ -445,6 +455,15 @@ async def claim_account_reward(user_client):
     return await click_latest_target_button(user_client, "claim", min_message_id=previous_message_id)
 
 
+async def claim_and_start_account_exploration(user_client):
+    claimed = await claim_account_reward(user_client)
+    if not claimed:
+        return False
+    await asyncio.sleep(2)
+    previous_message_id = await send_target_command(user_client)
+    return await click_latest_target_button(user_client, "quick", min_message_id=previous_message_id)
+
+
 async def run_explore_cycle(app_client, user_id, chat_id, phase="start"):
     cancel_flags[user_id] = False
     accounts = await sessions_col.find({"owner_tg_id": user_id}).to_list(length=100)
@@ -472,6 +491,8 @@ async def run_explore_cycle(app_client, user_id, chat_id, phase="start"):
             await user_client.connect()
             if phase == "claim":
                 clicked = await claim_account_reward(user_client)
+            elif phase == "claim_and_reexplore":
+                clicked = await claim_and_start_account_exploration(user_client)
             else:
                 clicked, was_recovered = await start_account_exploration(user_client)
                 if was_recovered:
@@ -492,8 +513,18 @@ async def run_explore_cycle(app_client, user_id, chat_id, phase="start"):
     if status:
         if phase == "claim":
             result = f"✅ Claimed: `{success}`\n❌ Failed: `{failed}`"
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Re-explore", callback_data="re_explore")]])
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎁 Claim & Re-explore", callback_data="claim_and_reexplore")],
+                [InlineKeyboardButton("🔄 Re-explore", callback_data="re_explore")],
+            ])
             await safe_edit(status, f"🎁 *CLAIMING COMPLETE*\n\n{result}\n\n🔄 Press below when you want to start again.", reply_markup=keyboard)
+        elif phase == "claim_and_reexplore":
+            result = f"✅ Claimed & re-explored: `{success}`\n❌ Failed: `{failed}`"
+            await safe_edit(status, f"🎁 *CLAIM + RE-EXPLORE COMPLETE*\n\n{result}")
+            old_task = timer_tasks.pop(user_id, None)
+            if old_task and not old_task.done():
+                old_task.cancel()
+            timer_tasks[user_id] = asyncio.create_task(claim_timer(app_client, user_id, chat_id))
         else:
             recovery_line = f"\n♻️ Recovered old claims: `{recovered}`" if recovered else ""
             await safe_edit(status, f"✅ *EXPLORATION STARTED*\n\n✅ Started: `{success}`\n❌ Failed: `{failed}`{recovery_line}\n\n⏱️ Claim reminder in 5 minutes.")
@@ -506,7 +537,10 @@ async def run_explore_cycle(app_client, user_id, chat_id, phase="start"):
 async def claim_timer(app_client, user_id, chat_id):
     try:
         await asyncio.sleep(300)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Claim Rewards", callback_data="claim_rewards")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎁 Claim & Re-explore", callback_data="claim_and_reexplore")],
+            [InlineKeyboardButton("🎁 Claim Rewards", callback_data="claim_rewards")],
+        ])
         await safe_send(app_client, chat_id, "🔔 *EXPLORATION TIME COMPLETE*\n\nYour accounts are ready for reward collection.", keyboard)
     except asyncio.CancelledError:
         raise
